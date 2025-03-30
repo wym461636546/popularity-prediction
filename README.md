@@ -1,5 +1,343 @@
 # popularity-prediction
-This project aimed to do below things:
-1: Should this recipe be listed?
-2: What kind of recipes have higher chance to become popular?
+# This project aimed to do below things:
+# 1: Should this recipe be listed?
+# 2: What kind of recipes have higher chance to become popular?
+#-----------------install packages that will be used--------------------#
+my_packages<-c("tidyverse","janitor","caret","ggplot2","openxlsx","ggthemes",
+               "readr","randomForest", "ggRandomForests","gridExtra",
+               "ranger")
+
+new_packages<-my_packages[!(my_packages %in% utils::installed.packages())]
+
+if(!require(new_packages)) {
+  install.packages(new_packages, dependencies = TRUE)}
+
+#----------------------------load packages-------------------------------#
+library(tidyverse)
+library(janitor)
+library(caret)
+library(openxlsx)
+library(ggplot2)
+library(ggthemes)
+library(readr)
+library(randomForest)
+library(ggRandomForests)
+library(gridExtra)
+library(ranger)
+#----------------------------read data-------------------------------#
+my_dir <- getwd()
+#-------------------------store the data in this directory-----------#
+my_df <- read_csv(paste(my_dir, "recipe_site_traffic_2212.csv", sep="/"),
+                  col_types = c("n","n","n","n","n","c","n","c"))
+
+#--------------data check, structure, missing values-------------------#
+head(my_df, 3)
+str(my_df)
+#column "servings" is character, not numeric as we expect
+summary(my_df)
+#check missing values
+colSums(is.na(my_df))  # Missing values per column
+#there are missing values in the data, particularly at the column "high_traffic"
+#check high_traffic values
+table(my_df$high_traffic,useNA = "ifany")
+#based on description "if the traffic to the site was high when this recipe
+#was shown, this is marked with “High". The NA probably stand for "not high"
+#check if category data like described
+table(my_df$category, useNA = "ifany")
+#"chicken Breast" obs were found, we will group it to "Chicken"
+#----------------------------data cleaning-------------------------------#
+#transfer "servings" to numeric
+unique(my_df$servings)
+my_df <- my_df%>%
+  mutate(servings = as.numeric(gsub("\\D", "", servings)))
+
+#double check servings after transformation
+unique(my_df$servings) 
+#fill missing values in calories,carbohydrate, sugar, protein with median values
+my_df<-my_df%>%
+  mutate_at(.vars = c("calories", "carbohydrate", "sugar", "protein"),
+            ~ replace_na(., median(., na.rm = TRUE)))%>%
+  mutate(high_traffic_t = ifelse(is.na(high_traffic), 0, 1),
+         category_recode = recode(category, "Chicken Breast" = "Chicken"))
+
+#check the data again
+summary(my_df)
+colSums(is.na(my_df))  
+# no more missing values in column calories,carbohydrate, sugar, protein
+#check the high_traffic and our new created column
+table(my_df$high_traffic, useNA = "ifany")
+table(my_df$high_traffic_t, useNA = "ifany")
+#check the category
+table(my_df$category, useNA = "ifany")
+table(my_df$category_recode, useNA = "ifany")
+#----------------------------EDA-------------------------------#
+#Pie chart of the high_traffic
+my_df %>%
+  group_by(high_traffic_t) %>%
+  summarise(count = n()) %>%
+  mutate(percentage = count / sum(count) * 100)%>%
+  ggplot(aes(x = "", y= count, fill = as.factor(high_traffic_t))) + 
+  geom_bar(stat = "identity", width = 1) + 
+  coord_polar(theta = "y") +  
+  ggtitle("High Traffic Percentage") + 
+  theme_minimal() +
+  theme(axis.text = element_blank(),  
+        axis.ticks = element_blank(),
+        panel.grid = element_blank()) +
+  xlab("") + 
+  ylab("") +
+  labs(fill ="IF High Traffic")+
+  geom_text(aes(label = paste0(round(percentage, 1), "%")), 
+            position = position_stack(vjust = 0.5), size = 4)
+  
+#60.6% of the receipes get high traffic
+#explore category
+my_df <- my_df%>%
+  mutate(category_recode = reorder(category_recode,
+                      -table(category_recode)[category_recode], 
+                      decreasing = T))
+my_df %>%
+  ggplot(aes(x = category_recode,
+             fill = category_recode)) +
+  geom_bar(stat = "count") +
+  labs(title = "Recipe Types Listed",
+       x = "Recipe Types", 
+       y = "Count") +
+  coord_flip() +  
+  theme_minimal() +
+  theme(legend.position = "none") 
+#We have listed Chicken Recipes the most
+#let's explore relationship between Recipe types and Traffic
+my_df%>%
+  ggplot(aes(x = category_recode, fill = as.factor(high_traffic_t))) +
+  geom_bar(position = "fill") +  
+  labs(title = "Proportion of High Traffic by Recipe Category",
+       x = "Recipe Types", 
+       y = "Proportion", 
+       fill = "If High Traffic") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+#we can see that vegetable, pork, potato recipes tend to have higher proportion 
+# of high traffic, and Beverage recipe have the lowest chance to have high traffic
+#let's explore if people care about calaries
+p1 <-my_df %>%
+  ggplot(aes(calories)) +
+  geom_histogram(binwidth = 50, fill = "steelblue") +  
+  facet_wrap(~ high_traffic_t, 
+             labeller = as_labeller(c("0" = "Low Traffic", 
+                                      "1" = "High Traffic"))) +
+  labs(title = "Distribution of Calories by If High Traffic",
+       x = "Calories",
+       y = "Count") +
+  theme_minimal()
+p1
+# we can see that Calorie distributions differ only slightly 
+#between high- and low-traffic recipes
+
+#check serving people with popularity
+my_df%>%
+  ggplot(aes(x = as.factor(servings), fill = as.factor(high_traffic_t))) +
+  geom_bar(position = "fill") +  
+  labs(title = "Proportion of High Traffic by Number of Servings",
+       x = "Number of Servings", 
+       y = "Proportion", 
+       fill = "If High Traffic") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#The recipes that serve 6 people have marginally higher chance to be popular than others
+# sugar and protein
+p2<-my_df %>%
+  ggplot(aes(sugar)) +
+  geom_histogram(bins  = 50, fill = "steelblue") +  
+  facet_wrap(~ high_traffic_t, 
+             labeller = as_labeller(c("0" = "Low Traffic", 
+                                      "1" = "High Traffic"))) +
+  labs(title = "Distribution of Sugar by If High Traffic",
+       x = "Sugar",
+       y = "Count") +
+  theme_minimal()
+
+p3<-my_df %>%
+  ggplot(aes(protein)) +
+  geom_histogram(bins  = 50, fill = "steelblue") +  
+  facet_wrap(~ high_traffic_t, 
+             labeller = as_labeller(c("0" = "Low Traffic", 
+                                      "1" = "High Traffic"))) +
+  labs(title = "Distribution of Protein by If High Traffic",
+       x = "Protein",
+       y = "Count") +
+  theme_minimal()
+
+grid.arrange(p1, p2, p3, ncol = 1)
+#The distribution of Sugar and protein between high and low traffic recipes are 
+# smilar as well.
+#----------------------------modeling-------------------------------#
+# Split Data into Train (80%) & Test sets (20%), and we want both the training and testing
+# sets have same proportion of high traffic recipes
+set.seed(111)
+trainIndex <- createDataPartition(my_df$high_traffic_t, p = 0.8, list = FALSE)
+train <- my_df[trainIndex,]
+test <- my_df[-trainIndex,]
+
+# 1: Baseline Model (Logistic Regression)
+model1 <- glm(high_traffic_t ~ calories + carbohydrate + sugar + protein 
+              + servings + category_recode, 
+              data = train, family = "binomial")
+summary(model1)
+# We can see that category was automatically converted into dummy variables
+# category is significantly related with if the recipe will get high traffic
+# the amount of Sugar has negative impact on if the recipe will get high traffic
+# Alternative Model (Random Forest)
+model2 <- randomForest(as.factor(high_traffic_t) ~ calories + 
+                         carbohydrate + sugar + protein + 
+                         servings + category_recode, 
+                       data = train, ntree = 100,
+                       importance = TRUE)
+print(model2)
+#check the vector importance and visualize them
+# Extract variable importance
+importance_values <- randomForest::importance(model2)  
+# use MeanDecreaseGini for feature ranking
+importance_df <- data.frame(Variable = rownames(importance_values), 
+           MeanDecreaseGini = importance_values[, "MeanDecreaseGini"])
+
+# Plot variable importance
+ggplot(importance_df, aes(x = reorder(Variable, MeanDecreaseGini), 
+                          y = MeanDecreaseGini)) +
+  geom_bar(stat = "identity", fill = "darkcyan") +
+  coord_flip() +
+  labs(title = "Variable Importance (Mean Decrease in Gini)", 
+       x = "Variables", y = "Importance") +
+  theme_calc()
+#Category is the most important vector, followed by protein. 
+
+# Plot with ggRandomForests
+# gg_rforest <- gg_vimp(model2)
+# plot(gg_rforest) +
+#   ggtitle("Variable Importance (Mean Decrease in Gini)") +
+#   theme_calc()
+
+# Predictions & Model Evaluation
+pred1 <- predict(model1, test, type = "response")
+pred1 <- ifelse(pred1 > 0.5, "1", "0")
+
+pred2 <- predict(model2, test, type = "class")
+
+# Confusion Matrix
+c1<-confusionMatrix(as.factor(pred1), as.factor(test$high_traffic_t), 
+                    positive = "1")
+c2<-confusionMatrix(pred2, as.factor(test$high_traffic_t), positive = "1")
+# Define a success metric: Precision (how well we correctly predict high traffic recipes)
+precision1 <- sum(pred1 == 1 & test$high_traffic_t == 1) / sum(test$high_traffic_t == 1)
+print(paste("Precision of Baseline Model:", round(precision1, 2)))
+
+precision2 <- sum(pred2 == 1 & test$high_traffic_t == 1) / sum(test$high_traffic_t == 1)
+print(paste("Precision of the First Comparison Model:", round(precision2, 2)))
+
+#random forest has higher ability to predict high traffic recipe correctly
+#finetune model
+tune_grid <- expand.grid(mtry = c(2, 5, 10),
+                         splitrule = c("gini", "extratrees"),
+                         min.node.size = c(1, 5, 10))
+
+# Train random forest with tuning
+# Precision is Positive Predictive Value
+precisionSummary <- function(data, lev = NULL, model = NULL) {
+  precision <- sum(data$pred == 1 & data$obs == 1) / sum(data$obs == 1) 
+  return(c(Precision = precision))
+}
+
+# Train the random forest model
+# the train() function automatically splits the data into training and 
+# testing based on the trainControl method. Here we use cross-validation, 
+set.seed(100)
+rf_tuned <- train(
+  as.factor(high_traffic_t) ~ calories + carbohydrate + sugar + 
+    protein + servings + category_recode, 
+  data = train,
+  method = "ranger", 
+  trControl = trainControl(
+    method = "cv", 
+    number = 10, 
+    summaryFunction = precisionSummary  # Use custom summary function
+  ),
+  importance = "impurity", #Gini Impurity 
+  tuneGrid = tune_grid
+)
+
+#important factors
+importance_ft<-ranger::importance(rf_tuned$finalModel)
+importance_ft <- data.frame(Variable = names(importance_ft),
+                            Importance = importance_ft)%>%
+  mutate(var = ifelse(startsWith(Variable, "category_recode"),
+                      "category",Variable))
+
+# Plot variable importance
+p4<-ggplot(importance_ft, aes(x = reorder(Variable, Importance), 
+                          y = Importance)) +
+  geom_bar(stat = "identity", fill = "coral1") +
+  coord_flip() +
+  labs(title = "Variable Importance (Fine Tuned Model)", 
+       x = "Variables", y = "Importance") +
+  theme_calc()
+#combine category importance
+p5<- importance_ft%>%
+  group_by(var)%>%
+  summarise(Importance = sum(Importance))%>%
+  ungroup%>%
+ ggplot( aes(x = reorder(var, Importance), 
+                          y = Importance)) +
+  geom_bar(stat = "identity", fill = "cornflowerblue") +
+  coord_flip() +
+  labs(title = "Variable Importance (Fine Tuned Model, Combining all category vectors)", 
+       x = "Variables", y = "Importance") +
+  theme_calc()
+
+grid.arrange(p4, p5, ncol = 2)
+# Get the predict results from tuned model
+
+pred3 <- predict.train(rf_tuned ,newdata = test)
+
+precision3 <- sum(pred3 == 1 & test$high_traffic_t == 1) / sum(test$high_traffic_t == 1)
+print(paste("Precision of the Second Comparison Model:", round(precision3, 2)))
+
+# After finetuning, the random forest achieved 82% accuracy on the test set on predicting
+# popular recipes
+
+# For a new prediction, we need data on "calories, carbohydrate, sugar,
+# protein, servings and category [10 categories], then we will get the 
+# prediction. "1" indicates high_traffic, and "0" indicate "not high traffic"
+
+#save the model for further prediction
+saveRDS(rf_tuned, file = paste(my_dir, "rf_tuned_model.rds", sep="/"))
+
+#load model for prediction
+recipe_model <- readRDS(paste(my_dir, "rf_tuned_model.rds", sep="/"))
+#new inputs (a dataframe), please change the input values accordingly
+new_data <- data.frame("calories"= 300,
+                      "carbohydrate"= 40.12,
+                       "sugar"= 1.25,
+                        "protein"= 2.45,
+                        "servings"= 4,
+                         "category_recode"= "Pork")
+
+
+
+if_high_traffic <- predict.train(recipe_model ,newdata = new_data)
+print(paste("Based on our prediction, this recipe will get",
+            ifelse(if_high_traffic==1,"High Traffic","Low Traffic"),
+            sep =" "))
+
+#another prediction
+new_data <- data.frame("calories"= 300,
+                       "carbohydrate"= 40.12,
+                       "sugar"= 1.25,
+                       "protein"= 2.45,
+                       "servings"= 4,
+                       "category_recode"= "Beverages")
+if_high_traffic <- predict.train(recipe_model ,newdata = new_data)
+print(paste("Based on our prediction, this recipe will get",
+            ifelse(if_high_traffic==1,"High Traffic","Low Traffic"),
+            sep =" "))
 
